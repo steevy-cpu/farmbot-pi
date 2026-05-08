@@ -1,171 +1,253 @@
 """
-FarmBot Arm Controller
-Scans /dev/cu.usbserial-AI0283MB for 7 Dynamixel AX-18A servos using pypot,
-prints each one's ID and current position, then moves all to zero
-if the full chain of 7 is found.
+FarmBot Arm Controller — raw Protocol 1.0 implementation
+Scans /dev/cu.usbserial-AI0283MB for 7 AX-18A servos, prints positions,
+then moves all to zero using individual WRITE packets (not SYNC WRITE).
 
-Baudrates tried: 1000000 (factory default for AX-18A), 57600
+Why raw instead of pypot:
+  pypot uses SYNC WRITE (broadcast, no status response) for all register
+  writes. On this half-duplex USB adapter the SYNC WRITE packets are
+  silently lost. Individual WRITE (0x03) packets carry a confirmed status
+  response, so we know each command was received and processed.
 
-AX-18A notes (Protocol 1.0):
-- Position range: 0-1023 raw = 0-300°; pypot center (0°) = raw 512 = 150°
-- Default Shutdown register = 0x24 (overheating + overload) — overload resets
-  torque_limit to 0, silently stalling the motor. Fix: re-arm torque_limit
-  before every movement step and move in small increments.
-- Moving Speed = 0 means MAX speed in joint mode; use non-zero for control.
-- Compliance slope default 32; lower = stiffer/more torque near goal.
+AX-18A key facts (Protocol 1.0):
+  Position raw 0-1023 = 0-300° physical; center (150°) = raw 512 = 0° here
+  Speed raw 0-1023; 0 = max speed; 97 rpm max ≈ 582 °/s @ 12 V
+  Torque Limit = 0 → motor disabled; default EEPROM = 983; resets on overload
+  Shutdown default 0x24 = overheating + overload bits → resets torque on fault
 """
 
+import struct
 import sys
 import time
 
 try:
-    import pypot.dynamixel
+    import serial
 except ImportError:
-    sys.exit("[ERROR] pypot not installed.  Run:  pip install pypot")
+    sys.exit("[ERROR] pyserial not installed.  Run:  pip install pyserial")
 
-PORT        = "/dev/cu.usbserial-AI0283MB"
-BAUDRATES   = [1000000, 57600]
-EXPECTED_IDS = list(range(1, 8))   # 7 servos, IDs 1-7
-MOVE_SPEED  = 50                   # deg/s — slow enough to avoid overload trips
-STEP_DEG    = 25                   # move this many degrees per increment
+PORT       = "/dev/cu.usbserial-AI0283MB"
+BAUD       = 1000000
+SERVO_IDS  = list(range(1, 8))
+STEP_DEG   = 25     # degrees per increment
+MOVE_SPEED = 50     # deg/s
 
+# AX-18A register addresses
+ADDR_TORQUE_ENABLE = 24
+ADDR_GOAL_POSITION = 30
+ADDR_MOVING_SPEED  = 32
+ADDR_TORQUE_LIMIT  = 34
+ADDR_PRESENT_POS   = 36
+ADDR_MOVING        = 46
 
-def _flush(dxl_io, delay=0.15):
-    """
-    Wait for echo bytes from the last sync write to arrive, then clear them.
-    Half-duplex TX echoes arrive ~1 ms after send; 150 ms is a safe margin.
-    """
-    time.sleep(delay)
-    dxl_io._serial.reset_input_buffer()
-    time.sleep(0.03)
+# ── Protocol 1.0 helpers ─────────────────────────────────────────────────────
 
+def _cs(data):
+    return (~sum(data)) & 0xFF
 
-def _read_position(dxl_io, ids, retries=4):
-    """Read present position with retries — corrupted echo bytes are common
-    on half-duplex adapters; flush and retry rather than crash."""
-    for attempt in range(retries):
-        _flush(dxl_io)
-        try:
-            return dxl_io.get_present_position(ids)
-        except Exception:
-            if attempt == retries - 1:
-                raise
-            time.sleep(0.15)
+def _build(servo_id, instruction, params=()):
+    body = [servo_id, len(params) + 2, instruction, *params]
+    return bytes([0xFF, 0xFF, *body, _cs(body)])
 
+def _read_status(ser, timeout=0.15):
+    """Read one status packet; return (id, error, data_bytes) or None."""
+    deadline = time.time() + timeout
+    buf = bytearray()
+    while time.time() < deadline:
+        b = ser.read(1)
+        if not b:
+            continue
+        buf += b
+        if len(buf) < 4:
+            continue
+        # Scan for 0xFF 0xFF header
+        idx = buf.find(b'\xff\xff')
+        if idx < 0:
+            buf = buf[-1:]
+            continue
+        buf = buf[idx:]
+        if len(buf) < 4:
+            continue
+        length = buf[3]
+        needed = 4 + length
+        while len(buf) < needed and time.time() < deadline:
+            more = ser.read(needed - len(buf))
+            if more:
+                buf += more
+        if len(buf) < needed:
+            return None
+        sid   = buf[2]
+        error = buf[4]
+        data  = bytes(buf[5 : 4 + length - 1])
+        return (sid, error, data)
+    return None
 
-def _arm_torque(dxl_io, ids):
-    """Enable torque and restore torque_limit (overload alarm resets it to 0)."""
-    dxl_io.enable_torque(ids)
-    time.sleep(0.05)
-    dxl_io.set_torque_limit({sid: 100.0 for sid in ids})
-    _flush(dxl_io)
+def _ping(ser, servo_id):
+    pkt = _build(servo_id, 0x01)
+    ser.reset_input_buffer()
+    ser.write(pkt)
+    ser.read(len(pkt))          # discard half-duplex TX echo
+    return _read_status(ser) is not None
 
+def _read_reg(ser, servo_id, address, length):
+    pkt = _build(servo_id, 0x02, [address, length])
+    ser.reset_input_buffer()
+    ser.write(pkt)
+    ser.read(len(pkt))
+    result = _read_status(ser)
+    if result is None:
+        return None
+    _, _, data = result
+    if length == 1:
+        return data[0] if data else None
+    if length == 2:
+        return struct.unpack('<H', data[:2])[0] if len(data) >= 2 else None
+    return data
 
-def move_servo_to_zero(dxl_io, sid, start_deg):
-    """
-    Move one servo to 0° in STEP_DEG increments.
-    Re-arms torque before every step so an overload shutdown between steps
-    doesn't silently stall the motor.
-    """
+def _write_reg(ser, servo_id, address, value, length=1):
+    """Write register and confirm via status response. Returns error byte."""
+    if length == 1:
+        raw_bytes = [value & 0xFF]
+    else:
+        raw_bytes = [value & 0xFF, (value >> 8) & 0xFF]
+    pkt = _build(servo_id, 0x03, [address, *raw_bytes])
+    ser.reset_input_buffer()
+    ser.write(pkt)
+    ser.read(len(pkt))
+    result = _read_status(ser, timeout=0.2)
+    if result is None:
+        return 0xFF          # no response = communication error
+    return result[1]         # error byte (0 = success)
+
+# ── Unit conversions ─────────────────────────────────────────────────────────
+
+def _deg_to_raw(deg):
+    """Degrees (-150…+150) → AX raw position (0…1023)."""
+    return max(0, min(1023, int((deg + 150.0) / 300.0 * 1023.0 + 0.5)))
+
+def _raw_to_deg(raw):
+    return raw / 1023.0 * 300.0 - 150.0
+
+def _speed_to_raw(deg_s):
+    """deg/s → raw speed (1…1023); 0 = max speed so we clamp to 1 minimum."""
+    return max(1, min(1023, int(deg_s / 684.0 * 1023.0 + 0.5)))
+
+# ── Per-servo helpers ─────────────────────────────────────────────────────────
+
+def _arm(ser, sid):
+    """Restore torque + torque_limit before each motion step."""
+    _write_reg(ser, sid, ADDR_TORQUE_ENABLE, 1,    length=1)
+    _write_reg(ser, sid, ADDR_TORQUE_LIMIT,  1023,  length=2)
+
+def _get_pos(ser, sid):
+    raw = _read_reg(ser, sid, ADDR_PRESENT_POS, 2)
+    return _raw_to_deg(raw) if raw is not None else None
+
+def _set_goal(ser, sid, deg):
+    raw = _deg_to_raw(deg)
+    err = _write_reg(ser, sid, ADDR_GOAL_POSITION, raw, length=2)
+    return err == 0
+
+# ── Main scan + move logic ────────────────────────────────────────────────────
+
+def scan(ser):
+    """Ping IDs 1-7, return {id: position_deg} for all that respond."""
+    found = {}
+    for sid in SERVO_IDS:
+        if _ping(ser, sid):
+            pos = _get_pos(ser, sid)
+            if pos is not None:
+                found[sid] = pos
+    return found
+
+def move_to_zero(ser, sid, start_deg):
+    """Move one servo to 0° in STEP_DEG increments with torque re-arm each step."""
     pos = start_deg
     step = 0
+    speed_raw = _speed_to_raw(MOVE_SPEED)
+    _write_reg(ser, sid, ADDR_MOVING_SPEED, speed_raw, length=2)
 
     while abs(pos) > 2.0:
         step += 1
         direction = -1 if pos > 0 else 1
-        delta = min(STEP_DEG, abs(pos))
+        delta  = min(STEP_DEG, abs(pos))
         target = pos + direction * delta
-        wait = delta / MOVE_SPEED + 0.4
+        wait   = delta / MOVE_SPEED + 0.5
 
         print(f"      step {step}: {pos:+.1f}° → {target:+.1f}°  (wait {wait:.1f} s)")
 
-        _arm_torque(dxl_io, [sid])
-        dxl_io.set_goal_position({sid: target})
+        _arm(ser, sid)
+        ok = _set_goal(ser, sid, target)
+        if not ok:
+            print(f"      [WARN] write not confirmed for servo {sid}")
+
         time.sleep(wait)
 
-        # Read actual position to track progress
-        actual = _read_position(dxl_io, [sid])[0]
-        print(f"               actual: {actual:+.1f}°")
+        actual = _get_pos(ser, sid)
+        if actual is None:
+            print(f"      [WARN] could not read position for servo {sid}")
+            break
+        print(f"             actual: {actual:+.1f}°")
 
         if abs(actual - pos) < 1.0:
             print(f"      Servo {sid} is stuck — stopping.")
             break
-
         pos = actual
 
-    _flush(dxl_io)
-    return dxl_io.get_present_position([sid])[0]
+    final = _get_pos(ser, sid)
+    return final if final is not None else pos
 
 
-def run(baudrate: int) -> bool:
-    """
-    Open one DxlIO session, scan, print positions, then move all to zero.
-    Scan and move share the same connection so _known_models stays warm
-    (pypot silently drops writes when it can't resolve motor models).
-    """
-    print(f"\n  Trying {baudrate} bps ...")
+def main():
+    print(f"FarmBot Arm Controller  |  port={PORT}  baud={BAUD}")
+    print(f"Servos: {SERVO_IDS}  |  step={STEP_DEG}°  speed={MOVE_SPEED} °/s\n")
+
     try:
-        dxl_io = pypot.dynamixel.DxlIO(PORT, baudrate=baudrate)
-    except Exception as exc:
-        print(f"  [ERROR] Could not open {PORT} at {baudrate}: {exc}")
-        return False
+        ser = serial.Serial(
+            port=PORT, baudrate=BAUD,
+            bytesize=serial.EIGHTBITS,
+            parity=serial.PARITY_NONE,
+            stopbits=serial.STOPBITS_ONE,
+            timeout=0.15,
+        )
+    except serial.SerialException as exc:
+        sys.exit(f"[ERROR] Cannot open {PORT}: {exc}")
 
-    with dxl_io:
+    with ser:
         # --- Scan ---
-        found = dxl_io.scan(EXPECTED_IDS)
-        if not found:
-            print("  (no response)")
-            return False
+        print("Scanning ...")
+        positions = scan(ser)
 
-        present = _read_position(dxl_io, found)
-        positions = dict(zip(found, present))
+        if not positions:
+            sys.exit("[ERROR] No servos found. Check wiring and power.")
 
-        print(f"\n  Found {len(found)} servo(s) at {baudrate} bps:")
-        for sid in found:
-            print(f"    Servo ID {sid:2d}  present position = {positions[sid]:+.1f} °")
+        print(f"\nFound {len(positions)}/{len(SERVO_IDS)} servo(s):")
+        for sid in SERVO_IDS:
+            if sid in positions:
+                print(f"  Servo ID {sid:2d}  present position = {positions[sid]:+.1f} °")
+            else:
+                print(f"  Servo ID {sid:2d}  NOT FOUND")
 
-        if len(found) < len(EXPECTED_IDS):
-            missing = sorted(set(EXPECTED_IDS) - set(found))
-            print(f"\n[WARN] Missing servo ID(s): {missing}")
-            print("[WARN] Not moving — need all 7 servos before commanding motion.")
-            return True
+        if len(positions) < len(SERVO_IDS):
+            missing = sorted(set(SERVO_IDS) - set(positions))
+            sys.exit(f"\n[ERROR] Missing servo ID(s): {missing} — fix chain before moving.")
 
-        # --- Set speed (same for all, sync write) ---
-        _arm_torque(dxl_io, found)
-        dxl_io.set_moving_speed({sid: MOVE_SPEED for sid in found})
-        _flush(dxl_io)
-
-        # --- Move tip-to-base, one servo at a time, in small increments ---
+        # --- Move tip-to-base ---
         print("\n[INFO] Moving all 7 servos to zero (stepped, tip-to-base) ...")
         finals = {}
-        for sid in reversed(found):
+        for sid in reversed(SERVO_IDS):
             start = positions[sid]
             if abs(start) < 2.0:
                 print(f"\n  Servo ID {sid:2d}  already at zero, skipping")
                 finals[sid] = start
                 continue
             print(f"\n  Servo ID {sid:2d}  {start:+.1f}° → 0° ...")
-            finals[sid] = move_servo_to_zero(dxl_io, sid, start)
+            finals[sid] = move_to_zero(ser, sid, start)
 
         print("\n  Final positions:")
-        for sid in found:
-            print(f"    Servo ID {sid:2d} → {finals[sid]:+.1f} °")
+        for sid in SERVO_IDS:
+            print(f"    Servo ID {sid:2d} → {finals.get(sid, 0):+.1f} °")
 
     print("\n[DONE]")
-    return True
-
-
-def main() -> None:
-    print(f"FarmBot Arm Controller  |  port={PORT}")
-    print(f"Looking for {len(EXPECTED_IDS)} AX-18A servos (IDs {EXPECTED_IDS[0]}-{EXPECTED_IDS[-1]})")
-    print(f"Baudrates to try: {BAUDRATES}")
-    print(f"Move: {STEP_DEG}° steps at {MOVE_SPEED} °/s\n")
-
-    for baud in BAUDRATES:
-        if run(baud):
-            break
-
-    print("\n--- Done ---")
 
 
 if __name__ == "__main__":
