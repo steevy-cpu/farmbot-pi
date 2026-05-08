@@ -70,12 +70,18 @@ def run(baudrate: int) -> None:
         dxl_io.set_moving_speed({sid: MOVE_SPEED for sid in found})
         time.sleep(0.1)
 
-        dxl_io.set_goal_position({sid: 0.0 for sid in found})
-
-        # Wait for all servos to finish (worst case 150° at 100 °/s ≈ 1.5 s)
-        # Polling is_moving() during motion causes serial buffer errors on
-        # half-duplex adapters, so a fixed sleep is safer here.
-        time.sleep(3.0)
+        # Move tip-to-base (highest IDs first) one at a time to avoid
+        # current spikes that stall the heavy base/shoulder joints.
+        current = dict(zip(found, dxl_io.get_present_position(found)))
+        for sid in reversed(found):
+            travel = abs(current[sid])          # degrees from zero
+            if travel < 2.0:
+                print(f"    Servo ID {sid:2d}  already at zero, skipping")
+                continue
+            wait = max(1.0, travel / MOVE_SPEED + 0.5)   # travel time + buffer
+            print(f"    Servo ID {sid:2d}  moving {current[sid]:+.1f}° → 0°  (wait {wait:.1f} s)")
+            dxl_io.set_goal_position({sid: 0.0})
+            time.sleep(wait)
 
         final = dxl_io.get_present_position(found)
         print("\n  Final positions after zero move:")
