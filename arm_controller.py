@@ -70,9 +70,16 @@ def run(baudrate: int) -> None:
         dxl_io.set_moving_speed({sid: MOVE_SPEED for sid in found})
         time.sleep(0.1)
 
+        # Flush RX buffer — sync writes leave echo/garbage bytes that
+        # corrupt the next read if not cleared first.
+        dxl_io._serial.reset_input_buffer()
+        time.sleep(0.05)
+
         # Move tip-to-base (highest IDs first) one at a time to avoid
         # current spikes that stall the heavy base/shoulder joints.
-        current = dict(zip(found, dxl_io.get_present_position(found)))
+        # Reuse positions already read during scan — avoids an extra read
+        # right after the sync writes while the buffer may still be dirty.
+        current = positions
         for sid in reversed(found):
             travel = abs(current[sid])          # degrees from zero
             if travel < 2.0:
@@ -83,6 +90,8 @@ def run(baudrate: int) -> None:
             dxl_io.set_goal_position({sid: 0.0})
             time.sleep(wait)
 
+        dxl_io._serial.reset_input_buffer()
+        time.sleep(0.05)
         final = dxl_io.get_present_position(found)
         print("\n  Final positions after zero move:")
         for sid, pos in zip(found, final):
