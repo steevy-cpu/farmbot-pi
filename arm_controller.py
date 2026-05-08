@@ -30,10 +30,27 @@ MOVE_SPEED  = 50                   # deg/s — slow enough to avoid overload tri
 STEP_DEG    = 25                   # move this many degrees per increment
 
 
-def _flush(dxl_io):
-    """Clear the RX buffer after sync writes to prevent parse errors."""
+def _flush(dxl_io, delay=0.15):
+    """
+    Wait for echo bytes from the last sync write to arrive, then clear them.
+    Half-duplex TX echoes arrive ~1 ms after send; 150 ms is a safe margin.
+    """
+    time.sleep(delay)
     dxl_io._serial.reset_input_buffer()
-    time.sleep(0.05)
+    time.sleep(0.03)
+
+
+def _read_position(dxl_io, ids, retries=4):
+    """Read present position with retries — corrupted echo bytes are common
+    on half-duplex adapters; flush and retry rather than crash."""
+    for attempt in range(retries):
+        _flush(dxl_io)
+        try:
+            return dxl_io.get_present_position(ids)
+        except Exception:
+            if attempt == retries - 1:
+                raise
+            time.sleep(0.15)
 
 
 def _arm_torque(dxl_io, ids):
@@ -41,7 +58,6 @@ def _arm_torque(dxl_io, ids):
     dxl_io.enable_torque(ids)
     time.sleep(0.05)
     dxl_io.set_torque_limit({sid: 100.0 for sid in ids})
-    time.sleep(0.05)
     _flush(dxl_io)
 
 
@@ -68,8 +84,7 @@ def move_servo_to_zero(dxl_io, sid, start_deg):
         time.sleep(wait)
 
         # Read actual position to track progress
-        _flush(dxl_io)
-        actual = dxl_io.get_present_position([sid])[0]
+        actual = _read_position(dxl_io, [sid])[0]
         print(f"               actual: {actual:+.1f}°")
 
         if abs(actual - pos) < 1.0:
@@ -102,7 +117,7 @@ def run(baudrate: int) -> bool:
             print("  (no response)")
             return False
 
-        present = dxl_io.get_present_position(found)
+        present = _read_position(dxl_io, found)
         positions = dict(zip(found, present))
 
         print(f"\n  Found {len(found)} servo(s) at {baudrate} bps:")
