@@ -227,15 +227,20 @@ def main():
             missing = sorted(set(SERVO_IDS) - set(positions))
             sys.exit(f"\n[ERROR] Missing servo ID(s): {missing} — fix chain before moving.")
 
-        # --- Phase 1: heavy base joints first (base-to-tip), all others torque OFF ---
-        # Servos 2 and 3 carry the most mass. Disabling torque on idle servos
-        # frees current so the power supply can deliver full torque to 2 and 3.
-        print("\n[INFO] Phase 1 — zeroing heavy base joints (1, 2, 3) with others torque-off ...")
+        # --- Arm all servos first so every joint holds its position ---
+        # Never disable torque on a joint that hasn't reached a safe position —
+        # it will fall freely under gravity at large angles.
+        print("\n[INFO] Arming all servos (torque + torque_limit) ...")
         for sid in SERVO_IDS:
-            _write_reg(ser, sid, ADDR_TORQUE_ENABLE, 0, length=1)
+            _arm(ser, sid)
+            _write_reg(ser, sid, ADDR_MOVING_SPEED,
+                       _speed_to_raw(MOVE_SPEED_HEAVY if sid in HEAVY_IDS else MOVE_SPEED),
+                       length=2)
 
+        # --- Move tip-to-base, one at a time, all others holding position ---
+        print("\n[INFO] Moving to zero (tip-to-base, all joints holding) ...")
         finals = {}
-        for sid in [1, 2, 3]:
+        for sid in reversed(SERVO_IDS):
             start = positions[sid]
             if abs(start) < 2.0:
                 print(f"\n  Servo ID {sid:2d}  already at zero, skipping")
@@ -243,20 +248,6 @@ def main():
                 continue
             print(f"\n  Servo ID {sid:2d}  {start:+.1f}° → 0° ...")
             finals[sid] = move_to_zero(ser, sid, start)
-            # Disable torque after reaching zero — frees current for next joint
-            _write_reg(ser, sid, ADDR_TORQUE_ENABLE, 0, length=1)
-
-        # --- Phase 2: distal joints (tip-to-base), base joints stay torque-off ---
-        print("\n[INFO] Phase 2 — zeroing distal joints (4, 5, 6, 7) ...")
-        for sid in reversed([4, 5, 6, 7]):
-            start = positions[sid]
-            if abs(start) < 2.0:
-                print(f"\n  Servo ID {sid:2d}  already at zero, skipping")
-                finals[sid] = start
-                continue
-            print(f"\n  Servo ID {sid:2d}  {start:+.1f}° → 0° ...")
-            finals[sid] = move_to_zero(ser, sid, start)
-            _write_reg(ser, sid, ADDR_TORQUE_ENABLE, 0, length=1)
 
         print("\n  Final positions:")
         for sid in SERVO_IDS:
