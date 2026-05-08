@@ -1,6 +1,6 @@
 """
 FarmBot Arm Controller
-Scans /dev/ttyUSB0 for 7 Dynamixel AX-18A servos using pypot,
+Scans /dev/cu.usbserial-AI0283MB for 7 Dynamixel AX-18A servos using pypot,
 prints each one's ID and current position, then moves all to zero
 if the full chain of 7 is found.
 
@@ -17,7 +17,7 @@ except ImportError:
         "[ERROR] pypot not installed.  Run:  pip install pypot"
     )
 
-PORT = "/dev/ttyUSB0"
+PORT = "/dev/cu.usbserial-AI0283MB"
 BAUDRATES = [1000000, 57600]
 EXPECTED_IDS = list(range(1, 8))   # 7 servos, IDs 1-7
 MOVE_SPEED = 100                   # goal speed (deg/s) for zero move
