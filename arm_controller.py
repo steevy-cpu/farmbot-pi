@@ -63,6 +63,10 @@ def run(baudrate: int) -> None:
         dxl_io.enable_torque(found)
         time.sleep(0.1)
 
+        # torque_limit=0 silently prevents all motion even when torque is enabled
+        dxl_io.set_torque_limit({sid: 100.0 for sid in found})
+        time.sleep(0.1)
+
         dxl_io.set_moving_speed({sid: MOVE_SPEED for sid in found})
         time.sleep(0.1)
 
