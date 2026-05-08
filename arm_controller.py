@@ -23,77 +23,66 @@ EXPECTED_IDS = list(range(1, 8))   # 7 servos, IDs 1-7
 MOVE_SPEED = 100                   # goal speed (deg/s) for zero move
 
 
-def scan_at_baudrate(baudrate: int) -> tuple[list[int], dict[int, float]]:
+def run(baudrate: int) -> None:
     """
-    Open the port at *baudrate*, scan for IDs 1-7, and read present
-    positions for every servo that responds.
-
-    Returns (found_ids, positions) where positions is {id: degrees}.
+    Open one connection, scan, print positions, then move to zero if all 7
+    servos are found. Keeping scan and move in the same DxlIO session ensures
+    _known_models is already populated before any write command is sent
+    (pypot silently drops writes when it cannot resolve motor models).
     """
-    found: list[int] = []
-    positions: dict[int, float] = {}
-
     print(f"\n  Trying {baudrate} bps ...")
     try:
         dxl_io = pypot.dynamixel.DxlIO(PORT, baudrate=baudrate)
     except Exception as exc:
         print(f"  [ERROR] Could not open {PORT} at {baudrate}: {exc}")
-        return found, positions
+        return False
 
     with dxl_io:
+        # --- Scan ---
         found = dxl_io.scan(EXPECTED_IDS)
-        if found:
-            present = dxl_io.get_present_position(found)
-            # pypot returns a list aligned to the id list
-            positions = dict(zip(found, present))
+        if not found:
+            print("  (no response)")
+            return False
 
-    return found, positions
+        present = dxl_io.get_present_position(found)
+        positions = dict(zip(found, present))
 
+        print(f"\n  Found {len(found)} servo(s) at {baudrate} bps:")
+        for sid in found:
+            print(f"    Servo ID {sid:2d}  present position = {positions[sid]:+.1f} °")
 
-def move_to_zero(baudrate: int, ids: list[int]) -> None:
-    """
-    Re-open the port and command every servo in *ids* to 0 degrees,
-    then wait until all have settled (or 3 s timeout per servo).
-    """
-    print("\n[INFO] Moving all 7 servos to zero position (0 °) ...")
-    try:
-        dxl_io = pypot.dynamixel.DxlIO(PORT, baudrate=baudrate)
-    except Exception as exc:
-        print(f"[ERROR] Could not re-open {PORT}: {exc}")
-        return
+        if len(found) < len(EXPECTED_IDS):
+            missing = sorted(set(EXPECTED_IDS) - set(found))
+            print(f"\n[WARN] Missing servo ID(s): {missing}")
+            print("[WARN] Not moving — need all 7 servos before commanding motion.")
+            return True
 
-    with dxl_io:
-        # Enable torque so the servos will actually move
-        dxl_io.enable_torque(ids)
+        # --- Move to zero (same open connection, _known_models already warm) ---
+        print("\n[INFO] Moving all 7 servos to zero position (0 °) ...")
+
+        dxl_io.enable_torque(found)
         time.sleep(0.1)
 
-        # Set a modest speed so the move is controlled
-        speed_dict = {sid: MOVE_SPEED for sid in ids}
-        dxl_io.set_moving_speed(speed_dict)
+        dxl_io.set_moving_speed({sid: MOVE_SPEED for sid in found})
         time.sleep(0.1)
 
-        # Command all to 0 degrees simultaneously
-        goal_dict = {sid: 0.0 for sid in ids}
-        dxl_io.set_goal_position(goal_dict)
+        dxl_io.set_goal_position({sid: 0.0 for sid in found})
 
-        # Give servos time to start moving before polling
+        # Wait for motion to start, then poll the hardware moving flag
         time.sleep(0.5)
-
-        # Poll the hardware 'moving' flag until all servos settle (10 s max)
         deadline = time.time() + 10.0
         while time.time() < deadline:
             time.sleep(0.2)
-            still_moving = dxl_io.is_moving(ids)
-            if not any(still_moving):
+            if not any(dxl_io.is_moving(found)):
                 break
 
-        # Read final positions for confirmation
-        final = dxl_io.get_present_position(ids)
+        final = dxl_io.get_present_position(found)
         print("\n  Final positions after zero move:")
-        for sid, pos in zip(ids, final):
+        for sid, pos in zip(found, final):
             print(f"    Servo ID {sid:2d} → {pos:+.1f} °")
 
     print("\n[DONE] All servos at zero.")
+    return True
 
 
 def main() -> None:
@@ -101,42 +90,11 @@ def main() -> None:
     print(f"Looking for {len(EXPECTED_IDS)} AX-18A servos (IDs {EXPECTED_IDS[0]}-{EXPECTED_IDS[-1]})")
     print(f"Baudrates to try: {BAUDRATES}")
 
-    found_ids: list[int] = []
-    working_baudrate: int | None = None
-
     for baud in BAUDRATES:
-        ids, positions = scan_at_baudrate(baud)
+        if run(baud):
+            break
 
-        if ids:
-            print(f"\n  Found {len(ids)} servo(s) at {baud} bps:")
-            for sid in ids:
-                pos = positions[sid]
-                print(f"    Servo ID {sid:2d}  present position = {pos:+.1f} °")
-
-            # Keep the baudrate that found the most servos
-            if len(ids) > len(found_ids):
-                found_ids = ids
-                working_baudrate = baud
-        else:
-            print("  (no response)")
-
-    print("\n--- Scan complete ---")
-
-    if not found_ids:
-        print("[WARN] No AX-18A servos found.")
-        print("       Check wiring, power supply, and that /dev/ttyUSB0 is correct.")
-        sys.exit(1)
-
-    print(f"[INFO] {len(found_ids)}/{len(EXPECTED_IDS)} servo(s) found at {working_baudrate} bps.")
-
-    if len(found_ids) < len(EXPECTED_IDS):
-        missing = sorted(set(EXPECTED_IDS) - set(found_ids))
-        print(f"[WARN] Missing servo ID(s): {missing}")
-        print("[WARN] Not moving — need all 7 servos before commanding motion.")
-        sys.exit(1)
-
-    # All 7 found: move each to zero
-    move_to_zero(working_baudrate, found_ids)
+    print("\n--- Done ---")
 
 
 if __name__ == "__main__":
