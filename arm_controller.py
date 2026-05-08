@@ -48,38 +48,28 @@ def _build(servo_id, instruction, params=()):
     body = [servo_id, len(params) + 2, instruction, *params]
     return bytes([0xFF, 0xFF, *body, _cs(body)])
 
-def _read_status(ser, timeout=0.15):
-    """Read one status packet; return (id, error, data_bytes) or None."""
-    deadline = time.time() + timeout
-    buf = bytearray()
-    while time.time() < deadline:
-        b = ser.read(1)
-        if not b:
-            continue
-        buf += b
-        if len(buf) < 4:
-            continue
-        # Scan for 0xFF 0xFF header
-        idx = buf.find(b'\xff\xff')
-        if idx < 0:
-            buf = buf[-1:]
-            continue
-        buf = buf[idx:]
-        if len(buf) < 4:
-            continue
-        length = buf[3]
-        needed = 4 + length
-        while len(buf) < needed and time.time() < deadline:
-            more = ser.read(needed - len(buf))
-            if more:
-                buf += more
-        if len(buf) < needed:
-            return None
-        sid   = buf[2]
-        error = buf[4]
-        data  = bytes(buf[5 : 4 + length - 1])
-        return (sid, error, data)
-    return None
+def _read_status(ser):
+    """
+    Read one Protocol 1.0 status packet sequentially.
+    Matches the pattern in scan_dynamixel.py which is confirmed working.
+    Returns (servo_id, error, data_bytes) or None on timeout/bad data.
+    """
+    header = ser.read(2)
+    if len(header) < 2 or header != b'\xff\xff':
+        return None
+    id_byte = ser.read(1)
+    if not id_byte:
+        return None
+    length_byte = ser.read(1)
+    if not length_byte:
+        return None
+    length = length_byte[0]
+    rest = ser.read(length)
+    if len(rest) < length:
+        return None
+    error = rest[0]
+    data  = rest[1:-1]   # params, excluding trailing checksum byte
+    return (id_byte[0], error, bytes(data))
 
 def _ping(ser, servo_id):
     pkt = _build(servo_id, 0x01)
@@ -113,7 +103,7 @@ def _write_reg(ser, servo_id, address, value, length=1):
     ser.reset_input_buffer()
     ser.write(pkt)
     ser.read(len(pkt))
-    result = _read_status(ser, timeout=0.2)
+    result = _read_status(ser)
     if result is None:
         return 0xFF          # no response = communication error
     return result[1]         # error byte (0 = success)
@@ -207,7 +197,7 @@ def main():
             bytesize=serial.EIGHTBITS,
             parity=serial.PARITY_NONE,
             stopbits=serial.STOPBITS_ONE,
-            timeout=0.15,
+            timeout=0.1,
         )
     except serial.SerialException as exc:
         sys.exit(f"[ERROR] Cannot open {PORT}: {exc}")
