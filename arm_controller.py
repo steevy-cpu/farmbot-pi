@@ -34,12 +34,15 @@ MOVE_SPEED_HEAVY = 12    # deg/s for heavy base joints (1-3)
 HEAVY_IDS        = {1, 2, 3}
 
 # AX-18A register addresses
-ADDR_TORQUE_ENABLE = 24
-ADDR_GOAL_POSITION = 30
-ADDR_MOVING_SPEED  = 32
-ADDR_TORQUE_LIMIT  = 34
-ADDR_PRESENT_POS   = 36
-ADDR_MOVING        = 46
+ADDR_TORQUE_ENABLE  = 24
+ADDR_CW_SLOPE       = 28   # compliance slope — lower = stiffer = more torque
+ADDR_CCW_SLOPE      = 29
+ADDR_GOAL_POSITION  = 30
+ADDR_MOVING_SPEED   = 32
+ADDR_TORQUE_LIMIT   = 34
+ADDR_PRESENT_POS    = 36
+ADDR_MOVING         = 46
+ADDR_PUNCH          = 48   # minimum motor output (RAM, safe to write)
 
 # ── Protocol 1.0 helpers ─────────────────────────────────────────────────────
 
@@ -125,7 +128,13 @@ def _speed_to_raw(deg_s):
 def _arm(ser, sid):
     """Restore torque + torque_limit before each motion step."""
     _write_reg(ser, sid, ADDR_TORQUE_ENABLE, 1,    length=1)
-    _write_reg(ser, sid, ADDR_TORQUE_LIMIT,  1023,  length=2)
+    _write_reg(ser, sid, ADDR_TORQUE_LIMIT,  1023, length=2)
+    if sid in HEAVY_IDS:
+        # Stiffer compliance (8 vs default 32) = more torque applied near goal
+        _write_reg(ser, sid, ADDR_CW_SLOPE,  8, length=1)
+        _write_reg(ser, sid, ADDR_CCW_SLOPE, 8, length=1)
+        # Higher punch = larger minimum output to overcome gravity + static friction
+        _write_reg(ser, sid, ADDR_PUNCH, 150, length=2)
 
 def _get_pos(ser, sid):
     raw = _read_reg(ser, sid, ADDR_PRESENT_POS, 2)
