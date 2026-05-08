@@ -75,14 +75,12 @@ def _ping(ser, servo_id):
     pkt = _build(servo_id, 0x01)
     ser.reset_input_buffer()
     ser.write(pkt)
-    ser.read(len(pkt))          # discard half-duplex TX echo
     return _read_status(ser) is not None
 
 def _read_reg(ser, servo_id, address, length):
     pkt = _build(servo_id, 0x02, [address, length])
     ser.reset_input_buffer()
     ser.write(pkt)
-    ser.read(len(pkt))
     result = _read_status(ser)
     if result is None:
         return None
@@ -102,7 +100,6 @@ def _write_reg(ser, servo_id, address, value, length=1):
     pkt = _build(servo_id, 0x03, [address, *raw_bytes])
     ser.reset_input_buffer()
     ser.write(pkt)
-    ser.read(len(pkt))
     result = _read_status(ser)
     if result is None:
         return 0xFF          # no response = communication error
