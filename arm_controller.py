@@ -65,22 +65,26 @@ def move_to_zero(baudrate: int, ids: list[int]) -> None:
     with dxl_io:
         # Enable torque so the servos will actually move
         dxl_io.enable_torque(ids)
+        time.sleep(0.1)
 
         # Set a modest speed so the move is controlled
         speed_dict = {sid: MOVE_SPEED for sid in ids}
         dxl_io.set_moving_speed(speed_dict)
+        time.sleep(0.1)
 
         # Command all to 0 degrees simultaneously
         goal_dict = {sid: 0.0 for sid in ids}
         dxl_io.set_goal_position(goal_dict)
 
-        # Poll until all servos stop moving (or 5 s timeout)
-        deadline = time.time() + 5.0
+        # Give servos time to start moving before polling
+        time.sleep(0.5)
+
+        # Poll the hardware 'moving' flag until all servos settle (10 s max)
+        deadline = time.time() + 10.0
         while time.time() < deadline:
-            time.sleep(0.1)
-            moving = dxl_io.get_moving_speed(ids)
-            # get_moving_speed returns current speed; 0 means stopped
-            if all(abs(v) < 1.0 for v in moving):
+            time.sleep(0.2)
+            still_moving = dxl_io.get_moving(ids)
+            if not any(still_moving):
                 break
 
         # Read final positions for confirmation
