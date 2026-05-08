@@ -28,8 +28,10 @@ except ImportError:
 PORT       = "/dev/cu.usbserial-AI0283MB"
 BAUD       = 1000000
 SERVO_IDS  = list(range(1, 8))
-STEP_DEG   = 25     # degrees per increment
-MOVE_SPEED = 50     # deg/s
+STEP_DEG         = 10    # degrees per increment — smaller = less peak current
+MOVE_SPEED       = 30    # deg/s for distal joints (4-7)
+MOVE_SPEED_HEAVY = 12    # deg/s for heavy base joints (1-3)
+HEAVY_IDS        = {1, 2, 3}
 
 # AX-18A register addresses
 ADDR_TORQUE_ENABLE = 24
@@ -150,28 +152,26 @@ def move_to_zero(ser, sid, start_deg):
     """Move one servo to 0° in STEP_DEG increments with torque re-arm each step."""
     pos = start_deg
     step = 0
-    speed_raw = _speed_to_raw(MOVE_SPEED)
-    _write_reg(ser, sid, ADDR_MOVING_SPEED, speed_raw, length=2)
+    speed = MOVE_SPEED_HEAVY if sid in HEAVY_IDS else MOVE_SPEED
+    _write_reg(ser, sid, ADDR_MOVING_SPEED, _speed_to_raw(speed), length=2)
 
     while abs(pos) > 2.0:
         step += 1
         direction = -1 if pos > 0 else 1
         delta  = min(STEP_DEG, abs(pos))
         target = pos + direction * delta
-        wait   = delta / MOVE_SPEED + 0.5
+        wait   = delta / speed + 0.6   # travel time + settle buffer
 
         print(f"      step {step}: {pos:+.1f}° → {target:+.1f}°  (wait {wait:.1f} s)")
 
         _arm(ser, sid)
-        ok = _set_goal(ser, sid, target)
-        if not ok:
-            print(f"      [WARN] write not confirmed for servo {sid}")
+        _set_goal(ser, sid, target)    # writes are confirmed via position read-back
 
         time.sleep(wait)
 
         actual = _get_pos(ser, sid)
         if actual is None:
-            print(f"      [WARN] could not read position for servo {sid}")
+            print(f"      [ERROR] lost contact with servo {sid}")
             break
         print(f"             actual: {actual:+.1f}°")
 
