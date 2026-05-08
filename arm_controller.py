@@ -72,13 +72,10 @@ def run(baudrate: int) -> None:
 
         dxl_io.set_goal_position({sid: 0.0 for sid in found})
 
-        # Wait for motion to start, then poll the hardware moving flag
-        time.sleep(0.5)
-        deadline = time.time() + 10.0
-        while time.time() < deadline:
-            time.sleep(0.2)
-            if not any(dxl_io.is_moving(found)):
-                break
+        # Wait for all servos to finish (worst case 150° at 100 °/s ≈ 1.5 s)
+        # Polling is_moving() during motion causes serial buffer errors on
+        # half-duplex adapters, so a fixed sleep is safer here.
+        time.sleep(3.0)
 
         final = dxl_io.get_present_position(found)
         print("\n  Final positions after zero move:")
