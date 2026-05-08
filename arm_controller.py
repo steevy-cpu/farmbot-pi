@@ -227,10 +227,15 @@ def main():
             missing = sorted(set(SERVO_IDS) - set(positions))
             sys.exit(f"\n[ERROR] Missing servo ID(s): {missing} — fix chain before moving.")
 
-        # --- Move tip-to-base ---
-        print("\n[INFO] Moving all 7 servos to zero (stepped, tip-to-base) ...")
+        # --- Phase 1: heavy base joints first (base-to-tip), all others torque OFF ---
+        # Servos 2 and 3 carry the most mass. Disabling torque on idle servos
+        # frees current so the power supply can deliver full torque to 2 and 3.
+        print("\n[INFO] Phase 1 — zeroing heavy base joints (1, 2, 3) with others torque-off ...")
+        for sid in SERVO_IDS:
+            _write_reg(ser, sid, ADDR_TORQUE_ENABLE, 0, length=1)
+
         finals = {}
-        for sid in reversed(SERVO_IDS):
+        for sid in [1, 2, 3]:
             start = positions[sid]
             if abs(start) < 2.0:
                 print(f"\n  Servo ID {sid:2d}  already at zero, skipping")
@@ -238,10 +243,24 @@ def main():
                 continue
             print(f"\n  Servo ID {sid:2d}  {start:+.1f}° → 0° ...")
             finals[sid] = move_to_zero(ser, sid, start)
+            # Disable torque after reaching zero — frees current for next joint
+            _write_reg(ser, sid, ADDR_TORQUE_ENABLE, 0, length=1)
+
+        # --- Phase 2: distal joints (tip-to-base), base joints stay torque-off ---
+        print("\n[INFO] Phase 2 — zeroing distal joints (4, 5, 6, 7) ...")
+        for sid in reversed([4, 5, 6, 7]):
+            start = positions[sid]
+            if abs(start) < 2.0:
+                print(f"\n  Servo ID {sid:2d}  already at zero, skipping")
+                finals[sid] = start
+                continue
+            print(f"\n  Servo ID {sid:2d}  {start:+.1f}° → 0° ...")
+            finals[sid] = move_to_zero(ser, sid, start)
+            _write_reg(ser, sid, ADDR_TORQUE_ENABLE, 0, length=1)
 
         print("\n  Final positions:")
         for sid in SERVO_IDS:
-            print(f"    Servo ID {sid:2d} → {finals.get(sid, 0):+.1f} °")
+            print(f"    Servo ID {sid:2d} → {finals.get(sid, positions.get(sid, 0)):+.1f} °")
 
     print("\n[DONE]")
 
