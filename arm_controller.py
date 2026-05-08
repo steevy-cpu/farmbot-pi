@@ -237,16 +237,21 @@ def main():
                        _speed_to_raw(MOVE_SPEED_HEAVY if sid in HEAVY_IDS else MOVE_SPEED),
                        length=2)
 
-        # --- Move tip-to-base, one at a time, all others holding position ---
-        print("\n[INFO] Moving to zero (tip-to-base, all joints holding) ...")
+        # Move order: base joints first (1→2→3), then distal (4→5→6→7).
+        # Base joints carry the most mass — zeroing them first reduces the
+        # gravitational load on the distal joints when their turn comes.
+        MOVE_ORDER = [1, 2, 3, 4, 5, 6, 7]
+        print("\n[INFO] Moving to zero (base-first order, all joints holding) ...")
         finals = {}
-        for sid in reversed(SERVO_IDS):
+        for sid in MOVE_ORDER:
             start = positions[sid]
             if abs(start) < 2.0:
                 print(f"\n  Servo ID {sid:2d}  already at zero, skipping")
                 finals[sid] = start
                 continue
             print(f"\n  Servo ID {sid:2d}  {start:+.1f}° → 0° ...")
+            # Re-arm before each joint in case a previous fault reset torque
+            _arm(ser, sid)
             finals[sid] = move_to_zero(ser, sid, start)
 
         print("\n  Final positions:")
