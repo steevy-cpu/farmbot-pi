@@ -83,7 +83,7 @@ def move_to_zero(baudrate: int, ids: list[int]) -> None:
         deadline = time.time() + 10.0
         while time.time() < deadline:
             time.sleep(0.2)
-            still_moving = dxl_io.get_moving(ids)
+            still_moving = dxl_io.is_moving(ids)
             if not any(still_moving):
                 break
 
